@@ -118,7 +118,7 @@ function recurseWriteSteps(lineNumber: number, document, stream) {
 function getPreviousConcreteStep(document, lineNumber) {
     let previousLine = getLine(document, lineNumber - 1);
 
-    if (!isAndStep(previousLine))
+    if (!isAndStep(previousLine) && !isTableLine(previousLine))
         return getStepType(previousLine);
 
     return getPreviousConcreteStep(document, lineNumber - 1);
