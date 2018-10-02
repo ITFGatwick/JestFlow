@@ -15,7 +15,17 @@ export function activate(context: vscode.ExtensionContext) {
         let line = getLine(editor.document, editor.selection.start.line);
         let lineUsesTable = getLine(editor.document, editor.selection.start.line + 1).startsWith('|');
 
-        var stepType = getStepType(line);
+        if (isAndStep(line)) {
+            let previousStepType = getPreviousConcreteStep(editor.document, editor.selection.start.line);
+
+            if (previousStepType == "Scenario:") {
+                throwError("First step in scenario can not be an \'And\'");
+            }
+
+            line = line.replace("And", previousStepType);
+        }
+
+        var stepType = getStepType(line).toLowerCase();
         var argMatch = line.match(/'([^']*)'/g);
         var argCount = argMatch ? argMatch.length : 0;
         argCount += lineUsesTable ? 1 : 0;
@@ -36,7 +46,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         copypaste.copy(pasteString);
 
-        vscode.window.showInformationMessage(`Step copied to clipboard!`);
+        vscode.window.showInformationMessage(`Step (${stepType}) copied to clipboard!`);
     });
 
     vscode.workspace.onDidSaveTextDocument((document: vscode.TextDocument) => {
@@ -62,6 +72,10 @@ export function activate(context: vscode.ExtensionContext) {
                     let scenarioText = currentLine.substr(currentLine.indexOf(":") + 1).trim();
                     writeToFileStream(`test('${scenarioText}', ({ given, when, then }) => {`, stream);
 
+                    if (isAndStep(getLine(document, lineNumber + 1))) {
+                        throwError("First step in scenario can not be an \'And\'");
+                    }
+
                     lineNumber = recurseWriteSteps(++lineNumber, document, stream);
 
                     writeToFileStream(` });`, stream);
@@ -76,8 +90,18 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(disposable);
 }
 
+function throwError(message: string) {
+    vscode.window.showErrorMessage(message);
+    throw new Error(message);
+}
+
 function recurseWriteSteps(lineNumber: number, document, stream) {
     var line = getLine(document, lineNumber);
+
+    if (isAndStep(line)) {
+        let previousStepType = getPreviousConcreteStep(document, lineNumber)
+        line = line.replace("And", previousStepType);
+    }
 
     if (isStepLine(line)) {
         line = generateStepMethodName(line)
@@ -91,8 +115,17 @@ function recurseWriteSteps(lineNumber: number, document, stream) {
     return lineNumber++;
 }
 
+function getPreviousConcreteStep(document, lineNumber) {
+    let previousLine = getLine(document, lineNumber - 1);
+
+    if (!isAndStep(previousLine))
+        return getStepType(previousLine);
+
+    return getPreviousConcreteStep(document, lineNumber - 1);
+}
+
 function generateStepMethodName(line: string) {
-    var stepType = getStepType(line);
+    var stepType = getStepType(line).toLowerCase();
     line = line.replace(' ', '.');
     line = line.replace(/'([^']*)'/g, 'X');
     line = line.replace(/ /g, '_');
@@ -101,13 +134,18 @@ function generateStepMethodName(line: string) {
 }
 
 function getStepType(line: string) {
-    return line.match(/^.*? /)[0].trim().toLowerCase()
+    return line.match(/^.*? /)[0].trim();
+}
+
+function isAndStep(line: string) {
+    return line.startsWith("And");
 }
 
 function isStepLine(line: string) {
     return line.startsWith("Given ")
         || line.startsWith("When ")
         || line.startsWith("Then ")
+        || line.startsWith("And ")
 }
 
 function isCommentLine(line: string) {
