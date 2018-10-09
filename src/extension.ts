@@ -3,6 +3,8 @@ import * as vscode from 'vscode';
 import fs = require('fs');
 import path = require('path');
 import * as copypaste from 'copy-paste'
+import { generateCodeWithSeparateFunctionsFromFeature, parseFeature } from 'jest-cucumber';
+import * as Gherkin from 'gherkin';
 
 export function activate(context: vscode.ExtensionContext) {
     let disposable = vscode.commands.registerCommand('extension.generateStep', () => {
@@ -12,44 +14,50 @@ export function activate(context: vscode.ExtensionContext) {
             return; // No open text editor
         }
 
-        let line = getLine(editor.document, editor.selection.start.line);
-        let lineUsesTable = getLine(editor.document, editor.selection.start.line + 1).startsWith('|');
+        let useJestCucumber = vscode.workspace.getConfiguration('jestflow').get("usejestcucumbergeneration");
+        let pasteString = "";
 
-        if (isAndStep(line)) {
-            let previousStepType = getPreviousConcreteStep(editor.document, editor.selection.start.line);
+        if (useJestCucumber) {
+            let document = parseFeature(editor.document.getText());
+            pasteString = generateCodeWithSeparateFunctionsFromFeature(document, editor.selection.start.line + 1);
+        }
+        else {
+            var parser = new Gherkin.Parser();
+            var gherkinDocument = parser.parse(editor.document.getText());
 
-            if (previousStepType == "Scenario:") {
-                throwError("First step in scenario can not be an \'And\'");
+            var step = getStepForLine(gherkinDocument, editor.selection.start.line + 1);
+            let keyword = getKeywordForStep(step, gherkinDocument).toLowerCase();
+
+            var argMatch = step.text.match(/'([^']*)'/g);
+            var argCount = argMatch ? argMatch.length : 0;
+            var stepTextRegex = step.text.replace(/'([^']*)'/g, '\'(.*)\'');
+            var methodName = step.text.replace(/'([^']*)'/g, 'X').replace(/ /g, '_');
+
+            var argList = [];
+            for (let i = 0; i < argCount; i++) {
+                argList.push("arg" + i);
+            }
+            if (step.argument) {
+                argList.push("table");
             }
 
-            line = line.replace("And", previousStepType);
+            pasteString += `export const ${methodName} = ${keyword} => { \n`;
+            pasteString += `   ${keyword}(/${stepTextRegex}/, (${argList.toString()}) => { \n`;
+            pasteString += `   }); \n`;
+            pasteString += `}; \n`;
         }
-
-        var stepType = getStepType(line).toLowerCase();
-        var argMatch = line.match(/'([^']*)'/g);
-        var argCount = argMatch ? argMatch.length : 0;
-        argCount += lineUsesTable ? 1 : 0;
-        var stepText = line.replace(/^.*? /, '');
-        var methodName = stepText.replace(/'([^']*)'/g, 'X').replace(/ /g, '_');
-        var stepTextRegex = stepText.replace(/'([^']*)'/g, '\'(.*)\'');
-
-        var argList = [];
-        for (let i = 0; i < argCount; i++) {
-            argList.push("arg" + i);
-        }
-
-        let pasteString = "";
-        pasteString += `export const ${methodName} = ${stepType} => { \n`;
-        pasteString += `   ${stepType}(/${stepTextRegex}/, (${argList.toString()}) => { \n`;
-        pasteString += `   }); \n`;
-        pasteString += `}; \n`;
 
         copypaste.copy(pasteString);
 
-        vscode.window.showInformationMessage(`Step (${stepType}) copied to clipboard!`);
+        vscode.window.showInformationMessage(`Step copied to clipboard!`);
     });
 
+
     vscode.workspace.onDidSaveTextDocument((document: vscode.TextDocument) => {
+        let disabled = vscode.workspace.getConfiguration('jestflow').get("usejestcucumbergeneration");
+        if (disabled)
+            return;
+
         if (!document.fileName.endsWith(".feature"))
             return;
 
@@ -62,26 +70,23 @@ export function activate(context: vscode.ExtensionContext) {
 
             writeTestBoilerPlate(stream, document.uri.path);
 
-            for (let lineNumber = 0; lineNumber < document.lineCount - 1; lineNumber++) {
-                let currentLine = getLine(document, lineNumber);
-                if (isCommentLine(currentLine)) {
-                    continue;
+            var parser = new Gherkin.Parser();
+            var gherkinDocument = parser.parse(document.getText());
+
+            gherkinDocument.feature.children.forEach(scenario => {
+                if (isConjecture(scenario.steps[0])) {
+                    throwError("First step in scenario can not be an \'And\' or \'But\'");
                 }
 
-                if (currentLine.startsWith("Scenario")) {
-                    let scenarioText = currentLine.substr(currentLine.indexOf(":") + 1).trim();
-                    writeToFileStream(`test('${scenarioText}', ({ given, when, then }) => {`, stream);
-
-                    if (isAndStep(getLine(document, lineNumber + 1))) {
-                        throwError("First step in scenario can not be an \'And\'");
-                    }
-
-                    lineNumber = recurseWriteSteps(++lineNumber, document, stream);
-
-                    writeToFileStream(` });`, stream);
-                    writeToFileStream("", stream);
-                }
-            }
+                writeToFileStream(`test('${scenario.name}', ({ given, when, then }) => {`, stream);
+                scenario.steps.forEach((step) => {
+                    let keyword = getKeywordForStep(step, gherkinDocument);
+                    let line = generateStepMethodName(`${keyword}${step.text}`, keyword);
+                    writeToFileStream(`     ${line}`, stream);
+                });
+                writeToFileStream(` });`, stream);
+                writeToFileStream("", stream);
+            });
 
             saveGeneratedFeatureToDisk(stream);
         });
@@ -90,82 +95,62 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(disposable);
 }
 
+
+function getKeywordForStep(step, gherkinDocument): string {
+    if (!isConjecture(step))
+        return step.keyword.trim();
+
+    let scenarioForStep = gherkinDocument.feature.children.filter((scenario) => scenario.location.line < step.location.line).slice(-1).pop();
+    let latestKeyword: string;
+
+    for (let s of scenarioForStep.steps) {
+        if (!isConjecture(s))
+            latestKeyword = s.keyword.trim();
+
+        if (s.location.line == step.location.line)
+            break;
+    };
+
+    return latestKeyword;
+}
+
+function getStepForLine(gherkinDocument, lineNumber) {
+    let scenario = gherkinDocument.feature.children.filter((scenario) => scenario.location.line < lineNumber).slice(-1).pop();
+    return scenario.steps.find(step => step.location.line == lineNumber);
+}
+
+function isConjecture(step) {
+    let keyword = step.keyword.trim();
+    return keyword == "And" || keyword == "But";
+}
+
 function throwError(message: string) {
     vscode.window.showErrorMessage(message);
     throw new Error(message);
 }
 
-function recurseWriteSteps(lineNumber: number, document, stream) {
-    var line = getLine(document, lineNumber);
-
-    if (isAndStep(line)) {
-        let previousStepType = getPreviousConcreteStep(document, lineNumber)
-        line = line.replace("And", previousStepType);
-    }
-
-    if (isStepLine(line)) {
-        line = generateStepMethodName(line)
-        writeToFileStream(`     ${line}`, stream);
-        return recurseWriteSteps(++lineNumber, document, stream);
-    }
-    else if (isTableLine(line) || isCommentLine(line)) {
-        return recurseWriteSteps(++lineNumber, document, stream);
-    }
-
-    return lineNumber++;
-}
-
-function getPreviousConcreteStep(document, lineNumber) {
-    let previousLine = getLine(document, lineNumber - 1);
-
-    if (!isAndStep(previousLine) && !isTableLine(previousLine))
-        return getStepType(previousLine);
-
-    return getPreviousConcreteStep(document, lineNumber - 1);
-}
-
-function generateStepMethodName(line: string) {
-    var stepType = getStepType(line).toLowerCase();
-    line = line.replace(' ', '.');
+function generateStepMethodName(line: string, stepType: string) {
+    let regex = new RegExp(stepType);
+    line = line.replace(regex, stepType + '.');
     line = line.replace(/'([^']*)'/g, 'X');
     line = line.replace(/ /g, '_');
-    line += `(${stepType});`;
+    line += `(${stepType.toLowerCase()});`;
     return line;
 }
 
-function getStepType(line: string) {
-    return line.match(/^.*? /)[0].trim();
-}
-
-function isAndStep(line: string) {
-    return line.startsWith("And");
-}
-
-function isStepLine(line: string) {
-    return line.startsWith("Given ")
-        || line.startsWith("When ")
-        || line.startsWith("Then ")
-        || line.startsWith("And ")
-}
-
-function isCommentLine(line: string) {
-    return line.startsWith("#");
-}
-
-function isTableLine(line: string) {
-    return line.startsWith("|");
-}
-
 function writeTestBoilerPlate(stream, filename) {
-    let relativePathToTest = path.relative(filename.replace(/^.*?test/, '/test'), '/test').replace(/\\/g, "/").replace("../", "");
-    writeToFileStream("import { defineFeature, loadFeature } from 'jest-cucumber';", stream);
+    let rootFolder = vscode.workspace.getConfiguration('jestflow').get("stepsfolder");
+    let regex = new RegExp("^.*?" + rootFolder);
+    let relativePathToTest = path.relative(filename.replace(regex, '/' + rootFolder), '/' + rootFolder)
+        .replace(/\\/g, "/").replace("../", "");
 
+    writeToFileStream("import { defineFeature, loadFeature } from 'jest-cucumber';", stream);
     writeToFileStream(`import { TestHooks } from '${relativePathToTest}/configuration/TestHooks';`, stream);
     writeToFileStream(`import * as Given from '${relativePathToTest}/steps/given-steps';`, stream);
     writeToFileStream(`import * as When from '${relativePathToTest}/steps/when-steps';`, stream);
     writeToFileStream(`import * as Then from '${relativePathToTest}/steps/then-steps';`, stream);
     writeToFileStream("", stream);
-    writeToFileStream(`const feature = loadFeature('${filename.replace(/^.*?test/, './test')}');`, stream);
+    writeToFileStream(`const feature = loadFeature('${filename.replace(new RegExp("^.*?" + rootFolder), './' + rootFolder)}');`, stream);
     writeToFileStream("", stream);
     writeToFileStream("defineFeature(feature, test => {", stream);
     writeToFileStream(" beforeEach(() => {", stream);
@@ -194,10 +179,6 @@ function writeToFileStream(text, stream) {
 function saveGeneratedFeatureToDisk(stream) {
     writeToFileStream("});", stream);
     stream.end();
-}
-
-function getLine(document, lineNumber) {
-    return document.lineAt(lineNumber).text.trim();
 }
 
 export function deactivate() {
