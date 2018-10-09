@@ -14,8 +14,35 @@ Works very well with the `Cucumber (Gherkin) Full` Support extensions which will
 - select extensions
 - click 3 dots (more options) and choose install from VSIX
 
-# To-Do
-I want to make the locations for the steps and test hooks configurable and then publish it to the public extension list in VS Code.
+# Config
+  `"jestflow.usejestcucumbergeneration": true / [false],`
+  Setting to true will turn off the convention based generation when you save and call through to jest-cucumber's api to generate steps when you press `Alt + F12`. Defaults to `false`;
+  
+  `"jestflow.stepsfolder": "test"`
+  This is the root folder for which your test project lives.
+  Inside here if you are using the convention you will have to create the appropriate step files and test hooks.
+  
+  ## Expected Structure
+  ```
+  test/
+    steps/
+      given-steps.ts
+      when-steps.ts
+      then-steps.ts
+    configuration/
+      TestHooks.ts
+```
+```
+export class TestHooks {
+  static async BeforeEach() {
+    //TestIoc.Initialise();
+  }
+
+  static async AfterEach() {
+    //TestIoc.Reset();
+  }
+}
+```
 
 # Demo 
 ![Demo](jest-flow-demo.gif)
